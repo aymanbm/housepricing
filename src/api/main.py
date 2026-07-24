@@ -6,7 +6,8 @@ from pathlib import Path               # For handling file paths cleanly
 from typing import List, Dict, Any     # For type hints (clarity in endpoints)
 import pandas as pd                    # To handle incoming JSON as DataFrames
 import boto3, os                       # AWS SDK for Python + env variables
-
+from fastapi import Response, status
+from typing import Dict, Any
 # Import inference pipeline
 from src.inference_pipeline.inference import predict
 
@@ -54,17 +55,25 @@ def root():
     return {"message": "Housing Regression API is running 🚀"}
 
 # /health → checks if model exists, returns status info (like expected feature count).
+from fastapi import Response, status
+from typing import Dict, Any
+
 @app.get("/health")
-def health():
-    status: Dict[str, Any] = {"model_path": str(MODEL_PATH)}
+def health(response: Response):
+    status_data: Dict[str, Any] = {"model_path": str(MODEL_PATH)}
+    
     if not MODEL_PATH.exists():
-        status["status"] = "unhealthy"
-        status["error"] = "Model not found"
+        # Force le statut HTTP à 503 (Service Unavailable) pour qu'AWS détecte le problème
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        status_data["status"] = "unhealthy"
+        status_data["error"] = "Model not found"
     else:
-        status["status"] = "healthy"
+        response.status_code = status.HTTP_200_OK
+        status_data["status"] = "healthy"
         if TRAIN_FEATURE_COLUMNS:
-            status["n_features_expected"] = len(TRAIN_FEATURE_COLUMNS)
-    return status
+            status_data["n_features_expected"] = len(TRAIN_FEATURE_COLUMNS)
+            
+    return status_data
 
 # Prediction Endpoint: This is the core ML serving endpoint.
 @app.post("/predict")
