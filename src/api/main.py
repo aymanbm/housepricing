@@ -51,7 +51,6 @@ else:
 # App
 # ----------------------------
 app = FastAPI(title="Housing Regression API")
-
 @app.get("/")
 def root():
     return {"message": "Housing Regression API is running 🚀"}
@@ -74,13 +73,13 @@ def health(response: Response):
 
 @app.post("/predict")
 def predict_batch(data: List[dict]):
+
     if not MODEL_PATH.exists():
         return {"error": f"Model not found at {str(MODEL_PATH)}"}
 
     df = pd.DataFrame(data)
     if df.empty:
         return {"error": "No data provided"}
-
     preds_df = predict(df, model_path=MODEL_PATH)
 
     resp = {"predictions": preds_df["predicted_price"].astype(float).tolist()}

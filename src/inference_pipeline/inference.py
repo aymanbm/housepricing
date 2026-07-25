@@ -50,6 +50,7 @@ def predict(
     target_encoder_path: Path | str = DEFAULT_TARGET_ENCODER,
 ) -> pd.DataFrame:
     # Step 1: Preprocess raw input
+
     df = clean_and_merge(input_df)
     df = drop_duplicates(df)
     df = remove_outliers(df)
