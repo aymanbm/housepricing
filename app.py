@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import requests
 import plotly.express as px
-import boto3, os
+import boto3, os, time
 from pathlib import Path
 
 # ============================
@@ -14,14 +14,37 @@ REGION = os.getenv("AWS_REGION", "eu-north-1")
 
 s3 = boto3.client("s3", region_name=REGION)
 
-def load_from_s3(key, local_path):
-    """Download from S3 if not already cached locally."""
+def load_from_s3(key, local_path, max_retries=3, backoff_seconds=2):
+    """Download from S3 if not already cached locally, with retry on transient failures."""
     local_path = Path(local_path)
     if not local_path.exists():
         os.makedirs(local_path.parent, exist_ok=True)
-        st.info(f"📥 Downloading {key} from S3…")
-        s3.download_file(S3_BUCKET, key, str(local_path))
+        for attempt in range(1, max_retries + 1):
+            try:
+                print(f"📥 Downloading {key} from S3… (attempt {attempt}/{max_retries})")
+                s3.download_file(S3_BUCKET, key, str(local_path))
+                print(f"✅ Downloaded {key}")
+                break  # success, exit retry loop
+            except Exception as e:
+                print(f"⚠️ S3 download failed for {key} (attempt {attempt}/{max_retries}): {e}")
+                if attempt == max_retries:
+                    raise  # out of retries, let it fail loudly
+                time.sleep(backoff_seconds * attempt)  # linear backoff: 2s, 4s, 6s...
     return str(local_path)
+
+def post_with_retry(url, payload, max_retries=3, backoff_seconds=2, timeout=60):
+    """POST to the API with retry on transient network failures."""
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.post(url, json=payload, timeout=timeout)
+            resp.raise_for_status()
+            return resp
+        except Exception as e:
+            print(f"⚠️ API call failed (attempt {attempt}/{max_retries}): {e}")
+            if attempt == max_retries:
+                raise
+            time.sleep(backoff_seconds * attempt)
+    raise RuntimeError("post_with_retry: exhausted retries without returning or raising")
 
 # Paths (ensure available locally by fetching from S3 if missing)
 HOLDOUT_ENGINEERED_PATH = load_from_s3(
@@ -90,8 +113,7 @@ if st.button("Show Predictions 🚀"):
         payload = fe_df.loc[idx].to_dict(orient="records")
 
         try:
-            resp = requests.post(API_URL, json=payload, timeout=60)
-            resp.raise_for_status()
+            resp = post_with_retry(API_URL, payload)
             out = resp.json()
             preds = out.get("predictions", [])
             actuals = out.get("actuals", None)
@@ -130,8 +152,7 @@ if st.button("Show Predictions 🚀"):
                 idx_all = yearly_data.index
                 payload_all = fe_df.loc[idx_all].to_dict(orient="records")
 
-                resp_all = requests.post(API_URL, json=payload_all, timeout=60)
-                resp_all.raise_for_status()
+                resp_all = post_with_retry(API_URL, payload_all)
                 preds_all = resp_all.json().get("predictions", [])
 
                 yearly_data["prediction"] = pd.Series(preds_all, index=yearly_data.index).astype(float)
@@ -141,8 +162,7 @@ if st.button("Show Predictions 🚀"):
                 idx_region = yearly_data.index
                 payload_region = fe_df.loc[idx_region].to_dict(orient="records")
 
-                resp_region = requests.post(API_URL, json=payload_region, timeout=60)
-                resp_region.raise_for_status()
+                resp_region = post_with_retry(API_URL, payload_region)
                 preds_region = resp_region.json().get("predictions", [])
 
                 yearly_data["prediction"] = pd.Series(preds_region, index=yearly_data.index).astype(float)

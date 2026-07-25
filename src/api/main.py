@@ -1,13 +1,12 @@
 # Goal: Create a FastAPI app to serve your trained ML model into a web service that anyone 
 # (or any system) can call over HTTP.
 
-from fastapi import FastAPI            # Web framework for APIs
-from pathlib import Path               # For handling file paths cleanly
-from typing import List, Dict, Any     # For type hints (clarity in endpoints)
-import pandas as pd                    # To handle incoming JSON as DataFrames
-import boto3, os                       # AWS SDK for Python + env variables
-from fastapi import Response, status
-from typing import Dict, Any
+from fastapi import FastAPI, Response, status
+from pathlib import Path
+from typing import List, Dict, Any
+import pandas as pd
+import boto3, os, time
+
 # Import inference pipeline
 from src.inference_pipeline.inference import predict
 
@@ -18,25 +17,30 @@ S3_BUCKET = os.getenv("S3_BUCKET", "aymane-housing-regression-2026-v2")
 REGION = os.getenv("AWS_REGION", "eu-north-1")
 s3 = boto3.client("s3", region_name=REGION)
 
-# Ensures your app always has the latest model/data locally, 
-# but avoids re-downloading every time it starts.
-def load_from_s3(key, local_path):
-    """Download from S3 if not already cached locally."""
+def load_from_s3(key, local_path, max_retries=3, backoff_seconds=2):
+    """Download from S3 if not already cached locally, with retry on transient failures."""
     local_path = Path(local_path)
     if not local_path.exists():
         os.makedirs(local_path.parent, exist_ok=True)
-        print(f"📥 Downloading {key} from S3…")
-        s3.download_file(S3_BUCKET, key, str(local_path))
+        for attempt in range(1, max_retries + 1):
+            try:
+                print(f"📥 Downloading {key} from S3… (attempt {attempt}/{max_retries})")
+                s3.download_file(S3_BUCKET, key, str(local_path))
+                print(f"✅ Downloaded {key}")
+                break
+            except Exception as e:
+                print(f"⚠️ S3 download failed for {key} (attempt {attempt}/{max_retries}): {e}")
+                if attempt == max_retries:
+                    raise
+                time.sleep(backoff_seconds * attempt)
     return str(local_path)
 
 # ----------------------------
 # Paths
 # ----------------------------
-# Downloads model + training features from S3 if not cached.
 MODEL_PATH = Path(load_from_s3("models/xgb_best_model.pkl", "models/xgb_best_model.pkl"))
 TRAIN_FE_PATH = Path(load_from_s3("processed/feature_engineered_train.csv", "data/processed/feature_engineered_train.csv"))
 
-# Load expected training features for alignment
 if TRAIN_FE_PATH.exists():
     _train_cols = pd.read_csv(TRAIN_FE_PATH, nrows=1)
     TRAIN_FEATURE_COLUMNS = [c for c in _train_cols.columns if c != "price"]
@@ -46,24 +50,17 @@ else:
 # ----------------------------
 # App
 # ----------------------------
-# Instantiates the FastAPI app.
 app = FastAPI(title="Housing Regression API")
 
-# / → simple landing endpoint to confirm API is alive.
 @app.get("/")
 def root():
     return {"message": "Housing Regression API is running 🚀"}
 
-# /health → checks if model exists, returns status info (like expected feature count).
-from fastapi import Response, status
-from typing import Dict, Any
-
 @app.get("/health")
 def health(response: Response):
     status_data: Dict[str, Any] = {"model_path": str(MODEL_PATH)}
-    
+
     if not MODEL_PATH.exists():
-        # Force le statut HTTP à 503 (Service Unavailable) pour qu'AWS détecte le problème
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         status_data["status"] = "unhealthy"
         status_data["error"] = "Model not found"
@@ -72,10 +69,9 @@ def health(response: Response):
         status_data["status"] = "healthy"
         if TRAIN_FEATURE_COLUMNS:
             status_data["n_features_expected"] = len(TRAIN_FEATURE_COLUMNS)
-            
+
     return status_data
 
-# Prediction Endpoint: This is the core ML serving endpoint.
 @app.post("/predict")
 def predict_batch(data: List[dict]):
     if not MODEL_PATH.exists():
@@ -93,10 +89,8 @@ def predict_batch(data: List[dict]):
 
     return resp
 
-# Batch runner
 from src.batch.run_monthly import run_monthly_predictions
 
-# Trigger a monthly batch job via API.
 @app.post("/run_batch")
 def run_batch():
     preds = run_monthly_predictions()
@@ -106,7 +100,6 @@ def run_batch():
         "output_dir": "data/predictions/"
     }
 
-# Returns a preview of the most recent batch predictions.
 @app.get("/latest_predictions")
 def latest_predictions(limit: int = 5):
     pred_dir = Path("data/predictions")
@@ -121,16 +114,3 @@ def latest_predictions(limit: int = 5):
         "rows": int(len(df)),
         "preview": df.head(limit).to_dict(orient="records")
     }
-
-
-"""
-🔹 Execution Order / Module Flow
-
-1. Imports (FastAPI, pandas, boto3, your inference function).
-2. Config setup (env vars → bucket/region).
-3. S3 utility (load_from_s3).
-4. Download + load model/artifacts (MODEL_PATH, TRAIN_FE_PATH).
-5. Infer schema (TRAIN_FEATURE_COLUMNS).
-6. Create FastAPI app (app = FastAPI).
-7. Declare endpoints (/, /health, /predict, /run_batch, /latest_predictions).
-"""
